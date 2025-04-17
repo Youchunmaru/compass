@@ -1,6 +1,9 @@
 package com.youchunmaru.controller.security
 
+import com.youchunmaru.controller.databases.DatabaseController
+import com.youchunmaru.controller.security.SecurityController.Companion.checkUser
 import com.youchunmaru.model.User
+import com.youchunmaru.util.PasswordEncoder
 import io.ktor.http.*
 import io.ktor.serialization.kotlinx.json.*
 import io.ktor.server.application.*
@@ -17,23 +20,45 @@ import kotlinx.serialization.Serializable
 import org.jetbrains.exposed.sql.*
 import org.thymeleaf.templateresolver.ClassLoaderTemplateResolver
 
-fun Application.configureSecurity() {
-    authentication {
-        basic(name = "myauth1") {
-            realm = "Ktor Server"
-            validate { credentials ->
-                if (credentials.name == credentials.password) {
+class SecurityController {
+    companion object {
+        private val instance = SecurityController()
+        fun getInstance(): SecurityController {
+            return instance
+        }
+        suspend fun checkUser(credentials: UserPasswordCredential): UserIdPrincipal? {
+            val user = DatabaseController.getInstance().getUserService().read(credentials.name)
+            return if (user != null) {
+                if (PasswordEncoder().matches(credentials.password, user.password)) {
                     UserIdPrincipal(credentials.name)
-                } else {
+                }else{
                     null
                 }
+            }else{
+                null
             }
         }
+    }
+    private constructor()
+}
 
+fun Application.configureSecurity() {
+    authentication {
+        basic(name = "basic") {
+            realm = "Ktor Server"
+            validate { credentials ->
+               checkUser(credentials)
+            }
+        }
         session<MySession>("auth-session") {
             validate { session ->
-                if (session.count > 0){
-                    session
+                if (session.username.isNotEmpty()){
+                    val user = DatabaseController.getInstance().getUserService().read(session.username)
+                    if (user != null){
+                        session
+                    }else{
+                        null
+                    }
                 }else{
                     null
                 }
@@ -43,19 +68,14 @@ fun Application.configureSecurity() {
             }
         }
 
-        form(name = "myauth2") {
+        form(name = "form") {
             userParamName = "user"
             passwordParamName = "password"
             validate { credentials ->
-                if (credentials.name == credentials.password) {
-                    UserIdPrincipal(credentials.name)
-                } else {
-                    null
-                }
+                checkUser(credentials)
             }
             challenge {
-                call.respond(HttpStatusCode.Unauthorized)
-                /**/
+                call.respondRedirect("/login")
             }
         }
     }
@@ -66,34 +86,21 @@ fun Application.configureSecurity() {
     }
     routing {
         authenticate ("auth-session") {  }//use this everywhere
-        authenticate("myauth1") {
-            get("/protected/route/basic") {
-                val principal = call.principal<UserIdPrincipal>()!!
-                call.respondText("Hello ${principal.name}")
-            }
+        authenticate("basic") {
         }
+
         get("login"){
             call.respond(ThymeleafContent("login.html", mapOf("user" to User("",""))))
         }
-        authenticate("myauth2") {
+        authenticate("form") {
             post("/login") {
-                call.respondText("Hello, ${call.principal<UserIdPrincipal>()?.name}!")
                 val userName = call.principal<UserIdPrincipal>()?.name.toString()
-                call.sessions.set(MySession(count = 1))
-                call.respondRedirect("/hello")
+                call.sessions.set(MySession(userName))
+                call.respondRedirect("/")
             }
-            get("/protected/route/form") {
-                val principal = call.principal<UserIdPrincipal>()!!
-                call.respondText("Hello ${principal.name}")
-            }
-        }
-        get("/session/increment") {
-            val session = call.sessions.get<MySession>() ?: MySession()
-            call.sessions.set(session.copy(count = session.count + 1))
-            call.respondText("Counter is ${session.count}. Refresh to increment.")
         }
     }
 }
 
 @Serializable
-data class MySession(val count: Int = 0)
+data class MySession(val username: String)
